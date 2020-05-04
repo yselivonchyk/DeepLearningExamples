@@ -275,6 +275,7 @@ def setup_training(args):
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+        # torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args.n_gpu = 1
         
     if is_main_process():
@@ -464,7 +465,7 @@ def main():
 
     if args.use_env and 'LOCAL_RANK' in os.environ:
         args.local_rank = int(os.environ['LOCAL_RANK'])
-
+        
     random.seed(args.seed + args.local_rank)
     np.random.seed(args.seed + args.local_rank)
     torch.manual_seed(args.seed + args.local_rank)
