@@ -44,7 +44,17 @@ from schedulers import PolyWarmUpScheduler
 
 from file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from utils import is_main_process, format_step
-from apex.parallel import DistributedDataParallel as DDP
+from herring.torch.parallel import DistributedDataParallel as DDP
+import herring.torch as herring
+
+# Quick fix for existing calls
+torch.distributed.get_world_size = herring.get_world_size
+torch.distributed.get_local_rank = herring.get_local_rank
+torch.distributed.get_rank = herring.get_rank
+torch.distributed.is_initialized = lambda: True
+torch.distributed.broadcast = herring.broadcast
+torch.distributed.all_reduce = herring.all_reduce
+
 from schedulers import LinearWarmUpScheduler
 from apex.parallel.distributed import flat_dist_call
 import amp_C
@@ -185,7 +195,7 @@ def parse_arguments():
                              "E.g., 0.1 = 10%% of training.")
     parser.add_argument("--local_rank",
                         type=int,
-                        default=-1,
+                        default=herring.get_local_rank(),
                         help="local_rank for distributed training on gpus")
     parser.add_argument('--seed',
                         type=int,
@@ -270,7 +280,6 @@ def setup_training(args):
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-        torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args.n_gpu = 1
         
     if is_main_process():
@@ -384,7 +393,7 @@ def prepare_model_and_optimizer(args, device):
 
     if args.local_rank != -1:
         if not args.allreduce_post_accumulation:
-            model = DDP(model, message_size=250000000, gradient_predivide_factor=torch.distributed.get_world_size())
+            model = DDP(model)
         else:
             flat_dist_call([param.data for param in model.parameters()], torch.distributed.broadcast, (0,) )
     elif args.n_gpu > 1:
@@ -460,7 +469,7 @@ def main():
 
     if args.use_env and 'LOCAL_RANK' in os.environ:
         args.local_rank = int(os.environ['LOCAL_RANK'])
-        
+
     random.seed(args.seed + args.local_rank)
     np.random.seed(args.seed + args.local_rank)
     torch.manual_seed(args.seed + args.local_rank)
