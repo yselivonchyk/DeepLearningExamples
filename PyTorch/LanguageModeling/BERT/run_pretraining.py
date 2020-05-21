@@ -53,7 +53,7 @@ torch.distributed.get_local_rank = herring.get_local_rank
 torch.distributed.get_rank = herring.get_rank
 torch.distributed.is_initialized = lambda: True
 torch.distributed.broadcast = herring.broadcast
-torch.distributed.all_reduce = herring.all_reduce
+torch.distributed.all_reduce = herring.allreduce
 
 from schedulers import LinearWarmUpScheduler
 from apex.parallel.distributed import flat_dist_call
