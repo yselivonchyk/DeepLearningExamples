@@ -553,6 +553,8 @@ def main():
 
                 dataset_future = pool.submit(create_pretraining_dataset, data_file, args.max_predictions_per_seq, shared_file_list, args, worker_init)
 
+                global_start_time = start_time = time.time()
+                
                 train_iter = tqdm(train_dataloader, desc="Iteration", disable=args.disable_progress_bar) if is_main_process() else train_dataloader
                 for step, batch in enumerate(train_iter):
 
@@ -576,6 +578,14 @@ def main():
                     else:
                         loss.backward()
                     average_loss += loss.item()
+                    
+                    if training_steps % 100 == 0 and torch.distributed.get_rank() == 0:
+                        print("\nIt took %.4f sec to complete 100 steps (%d). %.3f it/s. Elapsed %.1f sec" % (
+                            time.time() - start_time,
+                            training_steps,
+                            100./(time.time() - start_time),
+                            time.time() - global_start_time))
+                        start_time = time.time()
 
                     if training_steps % args.gradient_accumulation_steps == 0:
                         lr_scheduler.step()  # learning rate warmup
