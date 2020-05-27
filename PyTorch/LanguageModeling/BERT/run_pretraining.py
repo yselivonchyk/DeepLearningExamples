@@ -71,7 +71,7 @@ def create_pretraining_dataset(input_file, max_pred_length, shared_list, args, w
     train_data = pretraining_dataset(input_file=input_file, max_pred_length=max_pred_length)
     train_sampler = RandomSampler(train_data)
     train_dataloader = DataLoader(train_data, sampler=train_sampler,
-                                  batch_size=args.train_batch_size * args.n_gpu, 
+                                  batch_size=args.train_batch_size * args.n_gpu,
                                   num_workers=4, worker_init_fn=worker_init,
                                   pin_memory=True)
     return train_dataloader, input_file
@@ -256,7 +256,7 @@ def parse_arguments():
                         action='store_true',
                         help='Disable tqdm progress bar')
     args = parser.parse_args()
-    
+
     return args
 
 def setup_training(args):
@@ -272,7 +272,7 @@ def setup_training(args):
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args.n_gpu = 1
-        
+
     if is_main_process():
         dllogger.init(backends=[dllogger.JSONStreamBackend(verbosity=dllogger.Verbosity.VERBOSE,
                                                            filename=args.json_summary),
@@ -332,7 +332,7 @@ def prepare_model_and_optimizer(args, device):
             checkpoint = torch.load(args.init_checkpoint, map_location="cpu")
 
         model.load_state_dict(checkpoint['model'], strict=False)
-        
+
         if args.phase2 and not args.init_checkpoint:
             global_step -= args.phase1_end_step
         if is_main_process():
@@ -341,15 +341,15 @@ def prepare_model_and_optimizer(args, device):
     model.to(device)
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'gamma', 'beta', 'LayerNorm']
-    
+
     optimizer_grouped_parameters = [
         {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
 
-    optimizer = FusedLAMB(optimizer_grouped_parameters, 
+    optimizer = FusedLAMB(optimizer_grouped_parameters,
                           lr=args.learning_rate)
-    lr_scheduler = PolyWarmUpScheduler(optimizer, 
-                                       warmup=args.warmup_proportion, 
+    lr_scheduler = PolyWarmUpScheduler(optimizer,
+                                       warmup=args.warmup_proportion,
                                        total_steps=args.max_steps)
     if args.fp16:
 
@@ -374,7 +374,7 @@ def prepare_model_and_optimizer(args, device):
                 checkpoint['optimizer']['param_groups'][iter]['lr'] = args.learning_rate
         optimizer.load_state_dict(checkpoint['optimizer'])  # , strict=False)
 
-        # Restore AMP master parameters          
+        # Restore AMP master parameters
         if args.fp16:
             optimizer._lazy_init_maybe_master_weights()
             optimizer._amp_stash.lazy_init_called = True
@@ -460,7 +460,7 @@ def main():
 
     if args.use_env and 'LOCAL_RANK' in os.environ:
         args.local_rank = int(os.environ['LOCAL_RANK'])
-        
+
     random.seed(args.seed + args.local_rank)
     np.random.seed(args.seed + args.local_rank)
     torch.manual_seed(args.seed + args.local_rank)
@@ -529,12 +529,12 @@ def main():
             overflow_buf = None
             if args.allreduce_post_accumulation:
                 overflow_buf = torch.cuda.IntTensor([0])
-            
+
             if len(files) == 1:
                 f_start_id = -1
             for f_id in range(f_start_id + 1 , len(files)):
-                
-   
+
+
                 if torch.distributed.get_world_size() > num_files:
                     data_file = files[(f_id*torch.distributed.get_world_size()+torch.distributed.get_rank() + remainder*f_id)%num_files]
                 else:
@@ -544,6 +544,7 @@ def main():
 
                 dataset_future = pool.submit(create_pretraining_dataset, data_file, args.max_predictions_per_seq, shared_file_list, args, worker_init)
 
+                global_start_time = start_time = time.time()
                 train_iter = tqdm(train_dataloader, desc="Iteration", disable=args.disable_progress_bar) if is_main_process() else train_dataloader
                 for step, batch in enumerate(train_iter):
 
@@ -567,6 +568,14 @@ def main():
                     else:
                         loss.backward()
                     average_loss += loss.item()
+
+                    if training_steps % 100 == 0 and torch.distributed.get_rank() == 0:
+                        print("\nIt took %.4f sec to complete 100 steps (%d). %.3f it/s. Elapsed %.1f sec" % (
+                            time.time() - start_time,
+                            training_steps,
+                            100. / (time.time() - start_time),
+                            time.time() - global_start_time))
+                        start_time = time.time()
 
                     if training_steps % args.gradient_accumulation_steps == 0:
                         lr_scheduler.step()  # learning rate warmup
