@@ -44,7 +44,17 @@ from schedulers import PolyWarmUpScheduler
 
 from file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from utils import is_main_process, format_step
-from apex.parallel import DistributedDataParallel as DDP
+
+import horovod.torch as hvd
+# Quick fix for existing calls
+torch.distributed.get_world_size = hvd.size
+torch.distributed.get_local_rank = hvd.local_rank
+torch.distributed.get_rank = hvd.rank
+torch.distributed.is_initialized = lambda: True
+torch.distributed.broadcast = hvd.broadcast
+torch.distributed.all_reduce = hvd.allreduce
+hvd.init()
+
 from schedulers import LinearWarmUpScheduler
 from apex.parallel.distributed import flat_dist_call
 import amp_C
@@ -69,7 +79,8 @@ class WorkerInitObj(object):
 
 def create_pretraining_dataset(input_file, max_pred_length, shared_list, args, worker_init):
     train_data = pretraining_dataset(input_file=input_file, max_pred_length=max_pred_length)
-    train_sampler = RandomSampler(train_data)
+    # train_sampler = RandomSampler(train_data)
+    train_sampler = DistributedSampler(train_data, num_replicas=hvd.size(), rank=hvd.rank())
     train_dataloader = DataLoader(train_data, sampler=train_sampler,
                                   batch_size=args.train_batch_size * args.n_gpu, 
                                   num_workers=4, worker_init_fn=worker_init,
@@ -185,7 +196,7 @@ def parse_arguments():
                              "E.g., 0.1 = 10%% of training.")
     parser.add_argument("--local_rank",
                         type=int,
-                        default=-1,
+                        default=hvd.local_rank(),
                         help="local_rank for distributed training on gpus")
     parser.add_argument('--seed',
                         type=int,
@@ -270,7 +281,7 @@ def setup_training(args):
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-        torch.distributed.init_process_group(backend='nccl', init_method='env://')
+        # torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args.n_gpu = 1
         
     if is_main_process():
@@ -384,13 +395,17 @@ def prepare_model_and_optimizer(args, device):
 
     if args.local_rank != -1:
         if not args.allreduce_post_accumulation:
-            model = DDP(model, message_size=250000000, gradient_predivide_factor=torch.distributed.get_world_size())
+            # model = DDP(model, message_size=250000000, gradient_predivide_factor=torch.distributed.get_world_size())
+            pass
         else:
             flat_dist_call([param.data for param in model.parameters()], torch.distributed.broadcast, (0,) )
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
     criterion = BertPretrainingCriterion(config.vocab_size)
+
+    optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=model.named_parameters())
+    hvd.broadcast_parameters(model.state_dict(), root_rank=0)
 
     return model, optimizer, lr_scheduler, checkpoint, global_step, criterion
 
@@ -492,6 +507,7 @@ def main():
         pool = ProcessPoolExecutor(1)
 
         # Note: We loop infinitely over epochs, termination is handled via iteration count
+        global_start_time = start_time = time.time()
         while True:
             thread = None
             if not args.resume_from_checkpoint or epoch > 0 or (args.phase2 and global_step < 1) or args.init_checkpoint:
@@ -567,6 +583,14 @@ def main():
                     else:
                         loss.backward()
                     average_loss += loss.item()
+
+                    if training_steps % 100 == 0 and torch.distributed.get_rank() == 0:
+                        print("\nIt took %.4f sec to complete 100 steps (%d). %.3f it/s. Elapsed %.1f sec" % (
+                            time.time() - start_time,
+                            training_steps,
+                            100./(time.time() - start_time),
+                            time.time() - global_start_time))
+                        start_time = time.time()
 
                     if training_steps % args.gradient_accumulation_steps == 0:
                         lr_scheduler.step()  # learning rate warmup
