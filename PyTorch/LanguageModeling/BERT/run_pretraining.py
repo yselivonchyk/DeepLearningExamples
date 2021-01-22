@@ -462,7 +462,7 @@ def take_optimizer_step(args, optimizer, model, overflow_buf, global_step):
     else:
         optimizer.step()
         #optimizer.zero_grad()
-        if global_step == 5:
+        if global_step == 15:
             hc.stopProfiling()
         for param in model.parameters():
             param.grad = None
