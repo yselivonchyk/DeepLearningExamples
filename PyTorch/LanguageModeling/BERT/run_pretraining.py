@@ -47,6 +47,7 @@ from utils import is_main_process, format_step
 from herring.torch.parallel import DistributedDataParallel as DDP
 import herring.torch.distributed as herring
 herring.init_process_group()
+import herringcommon as hc
 
 # Quick fix for existing calls
 torch.distributed.get_world_size = herring.get_world_size
@@ -259,6 +260,9 @@ def parse_arguments():
     parser.add_argument('--json-summary', type=str, default="results/dllogger.json",
                         help='If provided, the json summary will be written to'
                              'the specified file.')
+    parser.add_argument('--timeline', type=str, default=None,
+                        help='If provided, the profile/trace/timeline will be written to'
+                             'the specified file.')
     parser.add_argument("--use_env",
                         action='store_true',
                         help="Whether to read local rank from ENVVAR")
@@ -458,6 +462,8 @@ def take_optimizer_step(args, optimizer, model, overflow_buf, global_step):
     else:
         optimizer.step()
         #optimizer.zero_grad()
+        if global_step == 5:
+            hc.stopProfiling()
         for param in model.parameters():
             param.grad = None
         global_step += 1
@@ -467,6 +473,9 @@ def take_optimizer_step(args, optimizer, model, overflow_buf, global_step):
 def main():
 
     args = parse_arguments()
+    
+    if args.timeline is not None:
+        hc.startProfiling(args.timeline)
 
     if args.use_env and 'LOCAL_RANK' in os.environ:
         args.local_rank = int(os.environ['LOCAL_RANK'])
