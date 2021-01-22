@@ -45,7 +45,8 @@ from schedulers import PolyWarmUpScheduler
 from file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from utils import is_main_process, format_step
 from herring.torch.parallel import DistributedDataParallel as DDP
-import herring.torch as herring
+import herring.torch.distributed as herring
+herring.init_process_group()
 
 # Quick fix for existing calls
 torch.distributed.get_world_size = herring.get_world_size
