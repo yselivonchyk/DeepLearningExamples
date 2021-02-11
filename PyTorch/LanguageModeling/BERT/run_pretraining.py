@@ -44,7 +44,19 @@ from schedulers import PolyWarmUpScheduler
 
 from file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from utils import is_main_process, format_step
-from apex.parallel import DistributedDataParallel as DDP
+from herring.torch.parallel import DistributedDataParallel as DDP
+import herring.torch.distributed as herring
+herring.init_process_group()
+import herringcommon as hc
+
+# Quick fix for existing calls
+torch.distributed.get_world_size = herring.get_world_size
+torch.distributed.get_local_rank = herring.get_local_rank
+torch.distributed.get_rank = herring.get_rank
+torch.distributed.is_initialized = lambda: True
+torch.distributed.broadcast = herring.broadcast
+torch.distributed.all_reduce = herring.all_reduce
+
 from schedulers import LinearWarmUpScheduler
 from apex.parallel.distributed import flat_dist_call
 import amp_C
@@ -185,7 +197,7 @@ def parse_arguments():
                              "E.g., 0.1 = 10%% of training.")
     parser.add_argument("--local_rank",
                         type=int,
-                        default=-1,
+                        default=herring.get_local_rank(),
                         help="local_rank for distributed training on gpus")
     parser.add_argument('--seed',
                         type=int,
@@ -248,6 +260,9 @@ def parse_arguments():
     parser.add_argument('--json-summary', type=str, default="results/dllogger.json",
                         help='If provided, the json summary will be written to'
                              'the specified file.')
+    parser.add_argument('--timeline', type=str, default=None,
+                        help='If provided, the profile/trace/timeline will be written to'
+                             'the specified file.')
     parser.add_argument("--use_env",
                         action='store_true',
                         help="Whether to read local rank from ENVVAR")
@@ -270,7 +285,6 @@ def setup_training(args):
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-        torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args.n_gpu = 1
         
     if is_main_process():
@@ -384,7 +398,7 @@ def prepare_model_and_optimizer(args, device):
 
     if args.local_rank != -1:
         if not args.allreduce_post_accumulation:
-            model = DDP(model, message_size=250000000, gradient_predivide_factor=torch.distributed.get_world_size())
+            model = DDP(model)
         else:
             flat_dist_call([param.data for param in model.parameters()], torch.distributed.broadcast, (0,) )
     elif args.n_gpu > 1:
@@ -448,6 +462,8 @@ def take_optimizer_step(args, optimizer, model, overflow_buf, global_step):
     else:
         optimizer.step()
         #optimizer.zero_grad()
+        if global_step == 15:
+            hc.stopProfiling()
         for param in model.parameters():
             param.grad = None
         global_step += 1
@@ -457,6 +473,9 @@ def take_optimizer_step(args, optimizer, model, overflow_buf, global_step):
 def main():
 
     args = parse_arguments()
+    
+    if args.timeline is not None:
+        hc.startProfiling(args.timeline)
 
     if args.use_env and 'LOCAL_RANK' in os.environ:
         args.local_rank = int(os.environ['LOCAL_RANK'])
@@ -492,6 +511,7 @@ def main():
         pool = ProcessPoolExecutor(1)
 
         # Note: We loop infinitely over epochs, termination is handled via iteration count
+        global_start_time = start_time = time.time()
         while True:
             thread = None
             if not args.resume_from_checkpoint or epoch > 0 or (args.phase2 and global_step < 1) or args.init_checkpoint:
@@ -567,6 +587,14 @@ def main():
                     else:
                         loss.backward()
                     average_loss += loss.item()
+                    
+                    if training_steps % 100 == 0 and torch.distributed.get_rank() == 0:
+                        print("\nIt took %.4f sec to complete 100 steps (%d). %.3f it/s. Elapsed %.1f sec" % (
+                            time.time() - start_time,
+                            training_steps,
+                            100./(time.time() - start_time),
+                            time.time() - global_start_time))
+                        start_time = time.time()
 
                     if training_steps % args.gradient_accumulation_steps == 0:
                         lr_scheduler.step()  # learning rate warmup
